@@ -1,0 +1,164 @@
+from typing import Tuple, Optional, Literal
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+def _get_activation(name: str) -> nn.Module:
+    name = name.lower()
+    if name == "relu":
+        return nn.ReLU(inplace=True)
+    if name == "silu":
+        return nn.SiLU(inplace=True)
+    if name == "leakyrelu":
+        return nn.LeakyReLU(0.1, inplace=True)
+    raise ValueError(f"Unsupported activation: {name}")
+
+
+class ConvBNAct(nn.Module):
+    def __init__(
+            self,
+            in_ch: int,
+            out_ch: int,
+            kernel_size: int = 3,
+            stride: int = 1,
+            padding: Optional[int] = None,
+            activation: str = "relu",
+            depthwise_separable: bool = False,
+    ):
+        super().__init__()
+        if padding is None:
+            padding = kernel_size // 2
+
+        layers = []
+
+        if depthwise_separable:
+            # Depthwise
+            layers += [
+                nn.Conv2d(in_ch, in_ch, kernel_size, stride=stride, padding=padding, groups=in_ch, bias=False),
+                nn.BatchNorm2d(in_ch),
+                _get_activation(activation),
+            ]
+            # Pointwise
+            layers += [
+                nn.Conv2d(in_ch, out_ch, kernel_size=1, bias=False),
+                nn.BatchNorm2d(out_ch),
+                _get_activation(activation),
+            ]
+        else:
+            layers += [
+                nn.Conv2d(in_ch, out_ch, kernel_size, stride=stride, padding=padding, bias=False),
+                nn.BatchNorm2d(out_ch),
+                _get_activation(activation),
+            ]
+
+        self.block = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.block(x)
+
+
+class ChangePrior(nn.Module):
+    def __init__(
+            self,
+            in_channels: int,
+            num_dirs: int = 4,
+            hidden_channels: Optional[int] = None,
+            num_layers: int = 3,
+            downsample: int = 4,
+            downsample_mode: Literal["pool", "stride"] = "pool",
+            depthwise_separable: bool = False,
+            activation: str = "relu",
+            dropout_rate: float = 0.0,  # <-- [MODIFIED] Added dropout_rate parameter
+            return_upsampled: bool = False,
+    ):
+        super().__init__()
+        assert num_layers >= 3, "num_layers should be >= 3"
+        assert downsample >= 1, "downsample must be >= 1"
+        assert num_dirs >= 1, "num_dirs must be >= 1"
+        hidden_channels = hidden_channels or max(64, in_channels // 2)
+
+        self.num_dirs = num_dirs
+        self.downsample = downsample
+        self.downsample_mode = downsample_mode
+        self.return_upsampled = return_upsampled
+
+        stem_stride = downsample if (downsample_mode == "stride" and downsample > 1) else 1
+
+        layers = []
+        layers.append(
+            ConvBNAct(
+                in_ch=4 * in_channels,
+                out_ch=hidden_channels,
+                kernel_size=3,
+                stride=stem_stride,
+                activation=activation,
+                depthwise_separable=depthwise_separable,
+            )
+        )
+        if dropout_rate > 0:
+            layers.append(nn.Dropout2d(p=dropout_rate))
+
+        # Optional pooling downsample (if not using stride)
+        self.pool = None
+        if downsample_mode == "pool" and downsample > 1:
+            self.pool = nn.AvgPool2d(kernel_size=downsample, stride=downsample)
+
+        # Middle lightweight blocks
+        for _ in range(num_layers - 2):
+            layers.append(
+                ConvBNAct(
+                    in_ch=hidden_channels,
+                    out_ch=hidden_channels,
+                    kernel_size=3,
+                    stride=1,
+                    activation=activation,
+                    depthwise_separable=depthwise_separable,
+                )
+            )
+            if dropout_rate > 0:
+                layers.append(nn.Dropout2d(p=dropout_rate))
+
+        self.trunk = nn.Sequential(*layers)
+
+        self.head = nn.Conv2d(hidden_channels, num_dirs, kernel_size=3, padding=1)
+
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+
+    def forward(
+            self, ft1: torch.Tensor, ft2: torch.Tensor
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        if ft1.shape != ft2.shape:
+            raise ValueError(f"FT1 and FT2 must have the same shape, but got {ft1.shape} vs {ft2.shape}")
+        if ft1.dim() != 4:
+            raise ValueError(f"Expect input shape [B, C, H, W], got {ft1.shape}")
+
+        b, c, h, w = ft1.shape
+        x = torch.cat([
+            ft1,
+            ft2,
+            torch.abs(ft1 - ft2),
+            ft1 * ft2
+        ], dim=1)
+
+        if self.pool is not None:
+            x = self.pool(x)  # low-res first to save compute
+
+        x = self.trunk(x)
+        mprior_lowres = self.head(x)
+
+        if self.return_upsampled:
+            mprior = F.interpolate(mprior_lowres, size=(h, w), mode="bilinear", align_corners=False)
+            return mprior_lowres, mprior
+        else:
+            return mprior_lowres, None
