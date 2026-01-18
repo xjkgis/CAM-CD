@@ -1,1 +1,1 @@
-# CD-WSMamba
+# CAM-CD
