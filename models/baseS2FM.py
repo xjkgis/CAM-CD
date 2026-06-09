@@ -8,20 +8,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
-try:
-    from VMamba.classification.models.vmamba import VSSBlock, LayerNorm2d
-    from mamba_ssm import Mamba
-    from models.vmamba import CVSSDecoderBlock
-    from models.ghostnet import GhostModule
-    from models.se_module import SELayer
-except ImportError:
-    print("警告: 无法从项目中导入部分模块，将使用 nn.Module 作为占位符。")
-    VSSBlock, LayerNorm2d, Mamba, CVSSDecoderBlock, GhostModule, SELayer = [nn.Module] * 6
+from VMamba.classification.models.vmamba import VSSBlock, LayerNorm2d
+from mamba_ssm import Mamba
+from models.vmamba import CVSSDecoderBlock
+from models.ghostnet import GhostModule
+from models.se_module import SELayer
 
-
-# ===================================================================
-# SECTION 1: S2FM 模块及其辅助函数 (来自您最初的 baseS2FM.py)
-# ===================================================================
+VSSBlock, LayerNorm2d, Mamba, CVSSDecoderBlock, GhostModule, SELayer = [nn.Module] * 6
 
 def concat_features(FT1: torch.Tensor, FT2: torch.Tensor) -> torch.Tensor:
     return torch.cat([FT1, FT2], dim=1)
@@ -107,10 +100,6 @@ class S2FMFusion(nn.Module):
     def forward(self, f1, f2):
         return self.s2fm(f1, f2)
 
-
-# =============================================================================
-# SECTION 2: DECODER 模块 (来自您的 fullnet.py)
-# =============================================================================
 class PatchExpand(nn.Module):
     def __init__(self, input_resolution, dim, dim_scale=2, norm_layer=nn.LayerNorm):
         super().__init__()
@@ -193,10 +182,6 @@ class MambaDecoder(nn.Module):
             return main_out, out[1]
         return self.output(self.up(out).permute(0, 3, 1, 2).contiguous())
 
-
-# =============================================================================
-# SECTION 3: THE BASELINE MODEL (STMbaseS2FM)
-# =============================================================================
 class STMbaseS2FM(nn.Module):
     def __init__(
             self,
@@ -211,8 +196,6 @@ class STMbaseS2FM(nn.Module):
         self.dims = dims
         self.depths = depths
         self.deep_supervision = deep_supervision
-
-        # --- Encoder setup (与 FullNet 一致, 但使用标准 VSSBlock) ---
         self.stem = nn.Sequential(nn.Conv2d(in_channels, self.dims[0], 4, 4), nn.BatchNorm2d(self.dims[0]))
         dpr = torch.linspace(0, drop_path_rate, sum(depths)).tolist()
         dp_idx = 0
@@ -221,14 +204,11 @@ class STMbaseS2FM(nn.Module):
         for i in range(4):
             if i > 0: self.downsample_layers.append(
                 nn.Sequential(nn.BatchNorm2d(self.dims[i - 1]), nn.Conv2d(self.dims[i - 1], self.dims[i], 2, 2)))
-            # [核心差异]: 使用标准的 VSSBlock
             stage = nn.Sequential(*[
                 VSSBlock(hidden_dim=self.dims[i], drop_path=dpr[dp_idx + j], norm_layer=LayerNorm2d, channel_first=True,
                          **kwargs) for j in range(depths[i])])
             self.encoder_stages.append(stage)
             dp_idx += depths[i]
-
-        # --- Fusion and Decoder (与 FullNet 完全一致) ---
         self.fusions = nn.ModuleList([S2FMFusion(c, c, r1=s2fm_r1, r2=s2fm_r2, **kwargs) for c in self.dims])
         self.decoder = MambaDecoder(img_size, self.dims, num_classes, embed_dim, 4, depths, drop_path_rate,
                                     nn.LayerNorm, deep_supervision, **kwargs)
@@ -238,8 +218,6 @@ class STMbaseS2FM(nn.Module):
 
     def forward(self, t1: torch.Tensor, t2: torch.Tensor):
         H, W = t1.shape[-2:]
-
-        # --- 标准 Encoder 前向传播 ---
         x1, x2 = self.stem(t1), self.stem(t2)
         feats_t1, feats_t2 = [], []
         for i in range(len(self.depths)):
@@ -250,8 +228,6 @@ class STMbaseS2FM(nn.Module):
             if i < len(self.depths) - 1:
                 x1 = self.downsample_layers[i](x1)
                 x2 = self.downsample_layers[i](x2)
-
-        # --- Fusion and Decoder 前向传播 (与 FullNet 完全一致) ---
         skips = [self.fusions[i](feats_t1[i], feats_t2[i]) for i in range(len(self.depths))]
         decoder_output = self.decoder(list(reversed(skips)))
 
@@ -265,15 +241,8 @@ class STMbaseS2FM(nn.Module):
         else:
             return decoder_output
 
-
-# =============================================================================
-# SECTION 4: SELF-TESTING BLOCK
-# =============================================================================
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"测试设备: {device}\n")
-
-    # 实例化模型，参数尽量与 FullNet 保持一致以作对比
     model = STMbaseS2FM(
         img_size=[256, 256],
         dims=[64, 128, 256, 512],
@@ -288,11 +257,4 @@ if __name__ == "__main__":
     t2 = torch.randn(2, 3, 256, 256, device=device)
     with torch.no_grad():
         outputs = model(t1, t2)
-
-    print("✅ 模型成功执行前向传播。")
-    print(f"模型返回 {len(outputs)} 个输出 (1 主 + {len(outputs) - 1} 辅)。")
-    n_params = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
-    print(f"\n模型可训练参数量: {n_params:.2f}M")
-    print("✅ 精确基线模型构建完毕。")
-
 
