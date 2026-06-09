@@ -267,7 +267,6 @@ class VSSBlock_CAAS(nn.Module):
         self.mlp_branch = mlp_ratio > 0
         self.use_checkpoint = False
 
-        # 自动检测 channel_first
         if norm_layer in [nn.BatchNorm2d, LayerNorm2d]:
             channel_first = True
 
