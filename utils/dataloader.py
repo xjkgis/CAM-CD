@@ -90,8 +90,6 @@ class ChangeDataset(data.Dataset):
     def __init__(self, root, trainsize, mosaic_ratio=0.75):
         self.trainsize = trainsize
         self.mosaic_ratio = mosaic_ratio
-
-        # 1. 获取所有大图的文件路径
         self.image_root_A = os.path.join(root, 'A/')
         self.image_root_B = os.path.join(root, 'B/')
         self.gt_root = os.path.join(root, 'label/')
@@ -102,21 +100,12 @@ class ChangeDataset(data.Dataset):
             [self.image_root_B + f for f in os.listdir(self.image_root_B) if f.endswith(('.jpg', '.png'))])
         self.gts_paths = sorted([self.gt_root + f for f in os.listdir(self.gt_root) if f.endswith(('.jpg', '.png'))])
 
-        # 2. 检查图片尺寸并决定工作模式
-        self.mode = 'direct'  # 默认为直接加载模式
+        self.mode = 'direct'  
         self.tile_map = []
-
-        if not self.images_A_paths:
-            self.size = 0
-            print("警告: 数据集目录为空!")
-            return
-
-        # 打开第一张图片来确定尺寸
         with Image.open(self.images_A_paths[0]) as sample_img:
             width, height = sample_img.size
 
         if width > self.trainsize or height > self.trainsize:
-            print(f"检测到大尺寸图片 ({width}x{height})，启用'在线切块'模式。")
             self.mode = 'tile'
             tiles_per_row = width // self.trainsize
             tiles_per_col = height // self.trainsize
@@ -128,12 +117,9 @@ class ChangeDataset(data.Dataset):
                         self.tile_map.append((img_idx, row, col))
             self.size = len(self.tile_map)
         else:
-            print(f"检测到图片尺寸为 {width}x{height}，启用'直接加载'模式。")
             self.size = len(self.images_A_paths)
 
-        print(f"训练集初始化完成，总样本数: {self.size}")
-
-        # 3. 定义转换
+    
         self.img_transform = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])])
@@ -141,7 +127,6 @@ class ChangeDataset(data.Dataset):
 
     def __getitem__(self, index):
         if self.mode == 'tile':
-            # 在线切块模式
             img_idx, row, col = self.tile_map[index]
             top = row * self.trainsize
             left = col * self.trainsize
@@ -155,12 +140,10 @@ class ChangeDataset(data.Dataset):
             image_B = image_B_large.crop(box)
             gt = gt_large.crop(box)
         else:
-            # 直接加载模式
             image_A = Image.open(self.images_A_paths[index]).convert('RGB')
             image_B = Image.open(self.images_B_paths[index]).convert('RGB')
             gt = Image.open(self.gts_paths[index]).convert('L')
 
-        # 对加载好的256x256图块进行数据增强
         image_A, image_B, gt = cv_random_flip(image_A, image_B, gt)
         image_A, image_B, gt = randomRotation(image_A, image_B, gt)
         image_A, image_B = colorEnhance(image_A, image_B)
@@ -185,43 +168,26 @@ def get_loader(root, batchsize, trainsize, num_workers=1, shuffle=True, pin_memo
                                   pin_memory=pin_memory)
     return data_loader
 
-
-# --- 最终版 Test_ChangeDataset (支持切块与拼接) ---
-
 class Test_ChangeDataset(data.Dataset):
     def __init__(self, root, testsize):
         self.testsize = testsize
-
-        # 1. 获取文件路径
         self.image_root_A = os.path.join(root, 'A/')
         self.image_root_B = os.path.join(root, 'B/')
         self.gt_root = os.path.join(root, 'label/')
-
         self.images_A_paths = sorted(
             [self.image_root_A + f for f in os.listdir(self.image_root_A) if f.endswith(('.jpg', '.png'))])
         self.images_B_paths = sorted(
             [self.image_root_B + f for f in os.listdir(self.image_root_B) if f.endswith(('.jpg', '.png'))])
         self.gts_paths = sorted([self.gt_root + f for f in os.listdir(self.gt_root) if f.endswith(('.jpg', '.png'))])
-
-        # 2. 检查尺寸并决定模式
         self.mode = 'direct'
         self.tile_map = []
-        self.large_image_info = {}  # 存储每张大图的尺寸和切块信息
-
-        if not self.images_A_paths:
-            self.size = 0
-            print("警告: 测试集目录为空!")
-            return
-
+        self.large_image_info = {}  
         with Image.open(self.images_A_paths[0]) as sample_img:
             width, height = sample_img.size
-
         if width > self.testsize or height > self.testsize:
-            print(f"检测到测试集大尺寸图片 ({width}x{height})，启用'滑动窗口切块'模式。")
             self.mode = 'tile'
-            tiles_per_row = (width + self.testsize - 1) // self.testsize  # 向上取整
-            tiles_per_col = (height + self.testsize - 1) // self.testsize  # 向上取整
-
+            tiles_per_row = (width + self.testsize - 1) // self.testsize  
+            tiles_per_col = (height + self.testsize - 1) // self.testsize  
             for img_idx, img_path in enumerate(self.images_A_paths):
                 base_name = os.path.basename(img_path)
                 with Image.open(img_path) as img:
@@ -229,18 +195,13 @@ class Test_ChangeDataset(data.Dataset):
                     w_tiles = (w + self.testsize - 1) // self.testsize
                     h_tiles = (h + self.testsize - 1) // self.testsize
                     self.large_image_info[base_name] = {'width': w, 'height': h, 'tiles_w': w_tiles, 'tiles_h': h_tiles}
-
                 for row in range(h_tiles):
                     for col in range(w_tiles):
                         self.tile_map.append((img_idx, row, col))
             self.size = len(self.tile_map)
         else:
-            print(f"检测到测试集图片尺寸为 {width}x{height}，启用'直接加载'模式。")
             self.size = len(self.images_A_paths)
 
-        print(f"测试集初始化完成，总样本数: {self.size}")
-
-        # 3. 定义转换
         self.img_transform = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])])
@@ -265,7 +226,6 @@ class Test_ChangeDataset(data.Dataset):
             tile_B = large_B.crop((left, top, right, bottom))
             tile_gt = large_gt.crop((left, top, right, bottom))
 
-            # 如果裁剪的块小于目标尺寸 (发生在图像边缘), 则进行填充
             if tile_A.size != (self.testsize, self.testsize):
                 padded_A = Image.new('RGB', (self.testsize, self.testsize), (0, 0, 0))
                 padded_B = Image.new('RGB', (self.testsize, self.testsize), (0, 0, 0))
@@ -285,7 +245,7 @@ class Test_ChangeDataset(data.Dataset):
 
             return img_A, img_B, gt, base_name, info
 
-        else:  # direct mode
+        else: 
             img_A = Image.open(self.images_A_paths[index]).convert('RGB')
             img_B = Image.open(self.images_B_paths[index]).convert('RGB')
             gt = Image.open(self.gts_paths[index]).convert('L')
