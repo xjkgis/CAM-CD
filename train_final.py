@@ -65,7 +65,6 @@ def load_pretrained_weights(model, pretrained_path, device):
         model.load_state_dict(model_dict)
         return True
     except Exception as e:
-        print(f"失败: {e}")
         return False
 
 
