@@ -5,19 +5,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-
-
-try:
-    from models.change_prior import ChangePrior
-    from models.VSSBlock_CAAS import VSSBlock_CAAS, LayerNorm2d
-    from models.baseS2FM import S2FM
-    from models.vmamba import CVSSDecoderBlock
-
-    IMPORTS_SUCCESSFUL = True
-except ImportError as e:
-    print(f"Warning: Could not import project-specific modules: {e}")
-    print("Self-testing block will be skipped.")
-    IMPORTS_SUCCESSFUL = False
+from models.change_prior import ChangePrior
+from models.VSSBlock_CAAS import VSSBlock_CAAS, LayerNorm2d
+from models.baseS2FM import S2FM
+from models.vmamba import CVSSDecoderBlock
+   
 
 if IMPORTS_SUCCESSFUL:
     class PatchExpand(nn.Module):
